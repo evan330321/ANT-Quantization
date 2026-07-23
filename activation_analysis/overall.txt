@@ -1,0 +1,74 @@
+======================================================================
+ACTIVATION OUTLIER ANALYSIS - bert-base-uncased
+Threshold: 3.0σ
+Data: SST-2 validation, 32 samples, max_len=128
+Total layers analyzed: 73
+======================================================================
+
+Total activation elements: 339,763,200
+Total outliers:            3,261,800
+Overall outlier ratio:     0.9600%
+
+----------------------------------------------------------------------
+PER-LAYER OUTLIER RATIO
+----------------------------------------------------------------------
+Mean:   0.7764%
+Median: 0.4832%
+Min:    0.1336%
+Max:    2.1231%
+
+----------------------------------------------------------------------
+MAX SIGMA
+----------------------------------------------------------------------
+Mean:   48.08σ
+Median: 25.13σ
+Min:    12.50σ
+Max:    462.55σ  ← most extreme outlier
+
+----------------------------------------------------------------------
+OUTLIER VALUE DISTRIBUTION (weighted by outlier count)
+----------------------------------------------------------------------
+  3σ - 6σ      :  70.77%  of all outliers
+  6σ - 10σ     :  17.17%  of all outliers
+  10σ - 50σ    :  12.03%  of all outliers
+  50σ+         :   0.03%  of all outliers
+
+======================================================================
+GROUP-WISE ANALYSIS (weighted by tensor size)
+======================================================================
+
+  Group size = 2:
+    Groups with outlier     :  1.8831%
+    Groups with 2+ outliers :  0.0369%
+    Victim waste ratio      :  0.9415%
+
+  Group size = 4:
+    Groups with outlier     :  3.6346%
+    Groups with 2+ outliers :  0.1854%
+    Victim waste ratio      :  2.7259%
+
+  Group size = 8:
+    Groups with outlier     :  6.8814%
+    Groups with 2+ outliers :  0.6233%
+    Victim waste ratio      :  6.0212%
+
+======================================================================
+KEY QUESTIONS (ACTIVATION vs WEIGHT):
+======================================================================
+
+Q1: Do activations have MORE extreme outliers than weights?
+    Max sigma observed: 462.5σ
+    Outliers > 50σ:     0.03%
+    Outliers 10-50σ:    12.03%
+    → YES! activations have extreme outliers (paper's finding)
+    → More bits for outlier abfloat MIGHT actually help here
+
+Q2: Group collision rates:
+    Group=2 outlier-outlier collision: 0.0369%
+    Group=4 (2+ outliers per group):   0.1854%
+    Group=8 (2+ outliers per group):   0.6233%
+
+Q3: Victim waste comparison:
+    Group=2: 0.9415% of activations become victims
+    Group=4: 2.7259% of activations become victims
+    Group=8: 6.0212% of activations become victims

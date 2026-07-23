@@ -1,0 +1,69 @@
+======================================================================
+OUTLIER ANALYSIS SUMMARY - bert-base-uncased
+Threshold: 3.0σ (3-sigma rule)
+Total layers analyzed: 73
+======================================================================
+
+Total weight elements: 85,524,480
+Total outliers:        399,029
+Overall outlier ratio: 0.4666%
+
+----------------------------------------------------------------------
+PER-LAYER OUTLIER RATIO
+----------------------------------------------------------------------
+Mean:   0.4784%
+Median: 0.4344%
+Min:    0.2972%
+Max:    1.5432%
+
+----------------------------------------------------------------------
+MAX SIGMA (how extreme is the biggest value?)
+----------------------------------------------------------------------
+Mean:   26.70σ
+Median: 9.99σ
+Min:    5.29σ
+Max:    171.04σ  ← 最極端的 outlier
+
+----------------------------------------------------------------------
+OUTLIER VALUE DISTRIBUTION (weighted by outlier count)
+----------------------------------------------------------------------
+  3σ - 6σ      :  98.17%  of all outliers
+  6σ - 10σ     :   1.58%  of all outliers
+  10σ - 50σ    :   0.25%  of all outliers
+  50σ+         :   0.01%  of all outliers
+
+======================================================================
+GROUP-WISE ANALYSIS (weighted by tensor size)
+======================================================================
+
+  Group size = 2:
+    Groups with outlier     :  0.9217%
+    Groups with 2+ outliers :  0.0114%
+    Victim waste ratio      :  0.4609%
+
+  Group size = 4:
+    Groups with outlier     :  1.8068%
+    Groups with 2+ outliers :  0.0512%
+    Victim waste ratio      :  1.3551%
+
+  Group size = 8:
+    Groups with outlier     :  3.5012%
+    Groups with 2+ outliers :  0.1740%
+    Victim waste ratio      :  3.0635%
+
+======================================================================
+KEY QUESTIONS TO CHECK:
+======================================================================
+
+Q1: Are outliers extreme? (>50σ)
+    NO  - only 0.0% of outliers are >50σ → 4-bit may be enough
+
+Q2: Does larger group help catch more outliers?
+    Group=2 outlier-outlier collision: 0.0114%
+    Group=4 (2+ outliers per group):   0.0512%
+    Group=8 (2+ outliers per group):   0.1740%
+
+Q3: How much victim waste do we pay?
+    Group=2: 0.4609% of all values become victims
+    Group=4: 1.3551% of all values become victims
+    Group=8: 3.0635% of all values become victims
