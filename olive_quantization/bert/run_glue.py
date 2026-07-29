@@ -239,6 +239,8 @@ def parse_args():
         "--no_outlier",
         action="store_true"
     )
+    parser.add_argument("--group_size", type=int, default=2,
+                        help="OVP group size (2, 4, or 8). Default=2 (original OliVe).")
 
     args = parser.parse_args()
 

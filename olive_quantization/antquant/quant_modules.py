@@ -6,23 +6,43 @@ import numpy as np
 import quant_cuda
 
 class QuantBase():
-    def _quantization(x, quant_grid):
+    def _quantization(x, quant_grid, normal_size=-1):
         shape = x.shape
         quant_array = x.reshape(-1)
         quant_grid = quant_grid.type_as(quant_array)
-        quant_array, _ = quant_cuda.quant(quant_array, quant_grid)
+        quant_array, _ = quant_cuda.quant(quant_array, quant_grid, normal_size)
         quant_array = quant_array.view(shape)
         return quant_array
-
     @staticmethod
-    def forward(real_val, quant_grid):
+    def forward(real_val, quant_grid, normal_size=-1):
         with torch.no_grad():
-            dequantized_val = QuantBase._quantization(real_val, quant_grid)
+            dequantized_val = QuantBase._quantization(real_val, quant_grid, normal_size)
             return dequantized_val
+
+def pytorch_quantize(data, quant_grid):
+    """
+    純 PyTorch 版本的 quantization。
+    比 CUDA kernel 慢，但支援任意大小的 codebook。
+    """
+    original_shape = data.shape
+    flat = data.reshape(-1)                                    # (N,)
+    quant_grid = quant_grid.type_as(flat)                      # 統一 dtype
+    
+    # 為了節省記憶體，分批處理
+    batch_size = 10000  # 每次處理 10000 個 elements
+    result = torch.empty_like(flat)
+    
+    for i in range(0, flat.shape[0], batch_size):
+        chunk = flat[i:i+batch_size]                           # (batch,)
+        diff = (chunk.unsqueeze(-1) - quant_grid).abs()        # (batch, K)
+        idx = diff.argmin(dim=-1)                              # (batch,)
+        result[i:i+batch_size] = quant_grid[idx]
+    
+    return result.view(original_shape)
 
 
 class Quantizer(nn.Module):
-    def __init__(self, mode="base", bit=8, is_signed=True, is_enable=False, is_input=False, args=None, operator=None):
+    def __init__(self, mode="base", bit=8, is_signed=True, is_enable=False, is_input=False, args=None, operator=None, group_size=2):
         super(Quantizer, self).__init__()
         self.mode = mode
         self.is_input = is_input
@@ -32,6 +52,7 @@ class Quantizer(nn.Module):
         self.is_enable_weight = is_enable
         self.args = args
         self.operator = operator
+        self.group_size = group_size
         
         self.w_up = self.args.w_up
         self.a_up = self.args.a_up
@@ -155,10 +176,22 @@ class Quantizer(nn.Module):
     # abfloat 
     @torch.no_grad()
     def outlier_value(self, exp_bit = 2, exp_base = 5):
-        B = self.bit.item()
+        # 根據 group_size 決定 outlier bit 數
+        # group=2 → 4-bit (E2M1，原論文)
+        # group=4 → 12-bit (E2M8)
+        # group=8 → 28-bit (E2M24)
+        # Group=4 和 Group=8 都用 12-bit outlier（E2M9）
+        # Group_size 只影響 victim 犧牲率，不影響 outlier 精度
+        outlier_bit = 12 if self.group_size >= 4 else self.bit.item()
+    
+        # group=4 及以上用 E2 (exp_bit=2)，問題其實不是「不能用 E3」，是「E3 那組數值太大 → scale 分母太大 → 計算爆炸」。
+        if self.group_size >= 4:
+            exp_bit = 2
+    
+        B = outlier_bit
         if self.is_signed:
             B = B - 1
-            
+        
         value_bit = B
         mant_bit = value_bit - exp_bit
         values = []
@@ -301,23 +334,54 @@ class Quantizer(nn.Module):
             data = data / scale
             
         if not self.args.no_outlier:
-            quant_grid = torch.cat((self.quant_grid, self.outliers), dim = 0)
+            # normal codebook (前面)
+            normal_grid = self.quant_grid                            # 已經 sort 好
+            normal_grid, _ = torch.sort(normal_grid)
+            # outlier codebook (後面)
+            outlier_grid = self.outliers
+            outlier_grid, _ = torch.sort(outlier_grid)
+            # 拼接：前 N 個 normal，後面 outlier（binary search 用）
+            quant_grid = torch.cat((normal_grid, outlier_grid), dim=0)
         else:
             quant_grid = self.quant_grid
             
-        quant_data = QuantBase.forward(data, quant_grid)
+        # 全部走 CUDA kernel（不管 group_size）
+        normal_size = self.quant_grid.shape[0] if not self.args.no_outlier else -1
+        quant_data = QuantBase.forward(data, quant_grid, normal_size)
         shape = data.shape
         
-        # Outlier Victim Pair Encoding
+        # Outlier Victim Pair Encoding (支援 group_size = 2, 4, 8)
         if not self.args.no_outlier:
-            quant_data = quant_data.view(-1)                
+            quant_data = quant_data.view(-1)
             mask = quant_data.abs() > 32
-            victim_odd = torch.roll(mask, 1, -1)
-            victim_odd[::2] = 0
-            victim_even = torch.roll(mask & (~victim_odd), -1, -1)
-            victim_even[1::2] = 0
-            victim = victim_even | victim_odd
-            quant_data = quant_data * (~victim)
+            
+            G = self.group_size
+            N = quant_data.shape[0]
+            
+            # padding 讓長度是 G 的倍數
+            pad = (G - N % G) % G
+            if pad > 0:
+                quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
+                mask = torch.cat([mask, torch.zeros(pad, dtype=torch.bool, device=mask.device)])
+            
+            # reshape 成 (num_groups, group_size)
+            groups = quant_data.view(-1, G)
+            mask_g = mask.view(-1, G)
+            
+            # 每個 group 找是否有 outlier + outlier 位置
+            has_outlier = mask_g.any(dim=1)                     # shape: (num_groups,)
+            outlier_idx = groups.abs().argmax(dim=1)            # shape: (num_groups,)
+            
+            # 建立 victim mask：除了 outlier 位置，其他都是 victim
+            victim_mask = torch.ones_like(groups, dtype=torch.bool)
+            victim_mask.scatter_(1, outlier_idx.unsqueeze(1), False)     # outlier 位置不是 victim
+            victim_mask = victim_mask & has_outlier.unsqueeze(1)          # 沒 outlier 的 group 不用犧牲
+            
+            # victim 位置設為 0
+            groups = groups * (~victim_mask)
+            
+            # flatten 回去，並去掉 padding
+            quant_data = groups.view(-1)[:N]
 
         quant_data = quant_data.view(shape)
         tensor = (quant_data - data).detach() + data
@@ -362,8 +426,9 @@ class Conv1dQuantizer(nn.Module):
     def __init__(self, mode=None, wbit=None, abit=None, args=None):
         super(Conv1dQuantizer, self).__init__()
         assert mode is not None,'Quantizer is not initilized!'
-        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward)
-        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True)
+        gs = getattr(args, 'group_size', 2)
+        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward, group_size=gs)
+        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True, group_size=gs)
 
     def set_param(self, conv):
 
@@ -393,8 +458,9 @@ class Conv2dQuantizer(nn.Module):
     def __init__(self, mode=None, wbit=None, abit=None, args=None):
         super(Conv2dQuantizer, self).__init__()
         assert mode is not None,'Quantizer is not initilized!'
-        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward)
-        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True)
+        gs = getattr(args, 'group_size', 2)
+        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward, group_size=gs)
+        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True, group_size=gs)
 
     def set_param(self, conv):
         self.in_channels = conv.in_channels
@@ -430,8 +496,9 @@ class LinearQuantizer(nn.Module):
     def __init__(self, mode=None, wbit=None, abit=None, args=None):
         super(LinearQuantizer, self).__init__()
         assert mode is not None,'Quantizer is not initilized!'
-        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=F.linear)
-        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=F.linear, is_input=True)
+        gs = getattr(args, 'group_size', 2)
+        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=F.linear, group_size=gs)
+        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=F.linear, is_input=True, group_size=gs)
 
     def set_param(self, linear):
         self.in_features = linear.in_features

@@ -586,8 +586,9 @@ class Conv2dQuantizer(nn.Module):
     def __init__(self, mode=None, wbit=None, abit=None, args=None):
         super(Conv2dQuantizer, self).__init__()
         assert mode is not None,'Quantizer is not initilized!'
-        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward)
-        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True)
+        gs = getattr(args, 'group_size', 2)
+        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=self._conv_forward, group_size=gs)
+        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=self._conv_forward, is_input=True, group_size=gs)
 
     def set_param(self, conv):
         self.in_channels = conv.in_channels
@@ -624,8 +625,9 @@ class LinearQuantizer(nn.Module):
     def __init__(self, mode=None, wbit=None, abit=None, args=None):
         super(LinearQuantizer, self).__init__()
         assert mode is not None,'Quantizer is not initilized!'
-        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=F.linear)
-        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=F.linear, is_input=True)
+        gs = getattr(args, 'group_size', 2) # 我有改阿
+        self.quant_weight = TensorQuantizer(mode=mode, bit=wbit, is_signed=True, is_enable=True, args=args, operator=F.linear, group_size=gs)
+        self.quant_input  = TensorQuantizer(mode=mode, bit=abit, is_signed=False, is_enable=True, args=args, operator=F.linear, is_input=True, group_size=gs)
 
 
     def set_param(self, linear):

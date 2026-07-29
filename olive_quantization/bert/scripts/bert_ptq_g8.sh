@@ -15,7 +15,7 @@ if [ "$size" == "large" ] ; then
   batch_size=${4:-"64"}
 fi
 
-mkdir -p ./log/bert_${size}_ptq/$task_name
+mkdir -p ./log/bert_${size}_ptq_g8/$task_name
 
 export CUDA_VISIBLE_DEVICES=$gpu_num
 python run_glue.py \
@@ -25,11 +25,11 @@ python run_glue.py \
   --max_length 128 \
   --quantize_batch_size $batch_size \
   --per_device_eval_batch_size $batch_size \
-  --output_dir ./log/bert_${size}_ptq/$task_name/ \
+  --output_dir ./log/bert_${size}_ptq_g8/$task_name/ \
   --mode $mode \
   --abit 4 \
   --wbit 4 \
   -wu 250 \
   -wl 75  \
   -au 250 \
-  -al 75 2>&1 | tee ./log/bert_${size}_ptq/$task_name/${batch_size}.log
+  -al 75 --group_size 8 2>&1 | tee ./log/bert_${size}_ptq_g8/$task_name/${batch_size}.log

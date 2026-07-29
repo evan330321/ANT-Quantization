@@ -256,6 +256,8 @@ def parse_args(parser=argparse.ArgumentParser()):
                         help='weight bit width')
     parser.add_argument('--abit', '-ab', default='8', type=int, 
                         help='activation bit width')
+    parser.add_argument("--group_size", type=int, default=2,
+                        help="OVP group size (2, 4, or 8). Default=2 (original OliVe).")
     parser.add_argument('--percent', '-p', default='100', type=int, 
                         help='percent')
     parser.add_argument('--sigma', '-s', default='0', type=float, 
