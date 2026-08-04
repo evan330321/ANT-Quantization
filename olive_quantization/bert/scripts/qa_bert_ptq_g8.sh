@@ -8,6 +8,11 @@ mode=${5:-"ant-int-flint"}
 dataset_name=squad
 if [ "$size" == "base" ] ; then
   path="ModelTC/bert-base-$task_name "
+  batch_size=${4:-"64"}
+fi
+if [ "$size" == "large" ] ; then
+  path="yoshitomo-matsubara/bert-large-uncased-$task_name "
+  batch_size=${4:-"32"}
 fi
 
 if [ "$task_name" == "squad2" ] ; then
