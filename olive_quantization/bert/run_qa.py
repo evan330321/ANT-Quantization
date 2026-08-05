@@ -350,10 +350,10 @@ def parse_args():
         "--no_outlier",
         action="store_true"
     )
-    args = parser.parse_args()
-
     parser.add_argument("--group_size", type=int, default=2,
                         help="OVP group size (2, 4, or 8). Default=2 (original OliVe).")
+    args = parser.parse_args()
+
     # Sanity checks
     if (
         args.dataset_name is None
