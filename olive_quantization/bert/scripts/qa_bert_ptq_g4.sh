@@ -11,7 +11,11 @@ if [ "$size" == "base" ] ; then
   batch_size=${4:-"64"}
 fi
 if [ "$size" == "large" ] ; then
-  path="yoshitomo-matsubara/bert-large-uncased-$task_name "
+  if [ "$task_name" == "squad" ] ; then
+    path="bert-large-uncased-whole-word-masking-finetuned-squad"
+  else
+    path="deepset/bert-large-uncased-whole-word-masking-squad2"
+  fi
   batch_size=${4:-"32"}
 fi
 
@@ -19,9 +23,6 @@ if [ "$task_name" == "squad2" ] ; then
   dataset_name="squad_v2 --version_2_with_negative"
 fi
 
-if [ "$size" == "large" ] ; then
-  path="yoshitomo-matsubara/bert-large-uncased-$task_name "
-fi
 
 mkdir -p ./log/bert_${size}_ptq_g4/$task_name
 
