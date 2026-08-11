@@ -275,6 +275,9 @@ class QuantizeArguments:
     no_outlier: Optional[bool] = field(
         default=False, metadata={"help": "Use outlier mode or not"}
     )
+    group_size: Optional[int] = field(
+        default=2, metadata={"help": "Group size for OVP quantization (2, 4, 8)"}
+    )
 
 
 def main():

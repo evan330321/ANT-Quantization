@@ -7,6 +7,7 @@ batch_size=${6:-"8"}
 port=${7:-46666}
 desc=${8:-""}
 n8=${9:-"0"}
+group_size=${10:-"2"}
 
 mkdir -p ./log
 mkdir -p ./log/bigscience
@@ -14,9 +15,9 @@ mkdir -p ./log/facebook
 
 log_name=""
 if [ "$dataset" = "wikitext" ] ; then
-  log_name=$transformer_model"_"$dataset_config"_"$q_bit"bit_batch"$batch_size"_"$desc
+  log_name=$transformer_model"_"$dataset_config"_"$q_bit"bit_batch"$batch_size"_g"$group_size"_"$desc
 else
-  log_name=$transformer_model"_"$dataset"_"$q_bit"bit_batch"$batch_size"_"$desc
+  log_name=$transformer_model"_"$dataset"_"$q_bit"bit_batch"$batch_size"_g"$group_size"_"$desc
 fi
 
 python -u run_clm.py \
@@ -26,4 +27,5 @@ python -u run_clm.py \
   --do_eval \
   --mode=$q_mode --wbit=$q_bit --abit=$q_bit --a_low=75 --a_up=250 --w_low=75 --w_up=250 --layer_8bit_n=$n8 \
   --eval_batch_size=$batch_size --train_batch_size=$batch_size --quantize_batch_size=$batch_size \
+  --group_size=$group_size \
   2>&1 | tee ./log/${log_name}.log \

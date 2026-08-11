@@ -1,0 +1,15 @@
+{
+    "eval_exact": 76.84662680030321,
+    "eval_f1": 80.25896680698219,
+    "eval_total": 11873,
+    "eval_HasAns_exact": 79.68960863697706,
+    "eval_HasAns_f1": 86.52407437572516,
+    "eval_HasAns_total": 5928,
+    "eval_NoAns_exact": 74.01177460050462,
+    "eval_NoAns_f1": 74.01177460050462,
+    "eval_NoAns_total": 5945,
+    "eval_best_exact": 76.84662680030321,
+    "eval_best_exact_thresh": 0.0,
+    "eval_best_f1": 80.25896680698203,
+    "eval_best_f1_thresh": 0.0
+}
