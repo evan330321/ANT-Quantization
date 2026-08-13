@@ -117,7 +117,10 @@ class Quantizer(nn.Module):
         if self.is_signed:
             B = B - 1
         value_bit = B
-        assert(value_bit >= 2)
+        if value_bit < 2:
+            # 2-bit signed 做不了 flint（需要至少 2 bit 分 exp+mantissa）
+            # fallback 用 int codebook
+            return self.int_value()
 
         exp_num =     value_bit * 2 - 1
         neg_exp_num = value_bit - 1
@@ -176,17 +179,18 @@ class Quantizer(nn.Module):
     # abfloat 
     @torch.no_grad()
     def outlier_value(self, exp_bit = 2, exp_base = 5):
-        # 根據 group_size 決定 outlier bit 數
-        # group=2 → 4-bit (E2M1，原論文)
-        # group=4 → 12-bit (E2M8)
-        # group=8 → 28-bit (E2M24)
-        # Group=4 和 Group=8 都用 12-bit outlier（E2M9）
-        # Group_size 只影響 victim 犧牲率，不影響 outlier 精度
-        outlier_bit = 12 if self.group_size >= 4 else self.bit.item()
-    
-        # group=4 及以上用 E2 (exp_bit=2)，問題其實不是「不能用 E3」，是「E3 那組數值太大 → scale 分母太大 → 計算爆炸」。
-        if self.group_size >= 4:
-            exp_bit = 2
+        # outlier_bit 設計：
+        # W4A4: g=2 → 4-bit(E2M1), g=4 → 12-bit(E2M9), g=8 → 12-bit(E2M9)
+        # 2W4A: g=4 → 6-bit(E3M2), g=8 → 14-bit(E3M10)
+        if self.bit.item() <= 2:
+            # 2W4A: outlier_bit = (group_size - 1) * bit
+            outlier_bit = (self.group_size - 1) * self.bit.item()
+            exp_bit = 2  # E2 格式：E2M3(g=4), E2M11(g=8)
+        else:
+            # W4A4: 保持原始邏輯（g>=4 cap 在 12-bit）
+            outlier_bit = 12 if self.group_size >= 4 else self.bit.item()
+            if self.group_size >= 4:
+                exp_bit = 2
     
         B = outlier_bit
         if self.is_signed:
