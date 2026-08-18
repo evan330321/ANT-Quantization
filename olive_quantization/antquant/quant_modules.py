@@ -118,8 +118,7 @@ class Quantizer(nn.Module):
             B = B - 1
         value_bit = B
         if value_bit < 2:
-            # 2-bit signed 做不了 flint（需要至少 2 bit 分 exp+mantissa）
-            # fallback 用 int codebook
+            # 2-bit signed 做不了 flint，fallback 用 int
             return self.int_value()
 
         exp_num =     value_bit * 2 - 1
@@ -179,15 +178,19 @@ class Quantizer(nn.Module):
     # abfloat 
     @torch.no_grad()
     def outlier_value(self, exp_bit = 2, exp_base = 5):
+        # 根據 group_size 決定 outlier bit 數
+        # group=2 → 4-bit (E2M1，原論文)
+        # group=4 → 12-bit (E2M8)
+        # group=8 → 28-bit (E2M24)
+        # Group=4 和 Group=8 都用 12-bit outlier（E2M9）
+        # Group_size 只影響 victim 犧牲率，不影響 outlier 精度
         # outlier_bit 設計：
-        # W4A4: g=2 → 4-bit(E2M1), g=4 → 12-bit(E2M9), g=8 → 12-bit(E2M9)
-        # 2W4A: g=4 → 6-bit(E3M2), g=8 → 14-bit(E3M10)
+        # W4A4: g=2→4bit(E2M1), g=4→12bit(E2M9), g=8→12bit(E2M9)
+        # 2W4A: g=4→6bit(E2M3), g=8→14bit(E2M11)
         if self.bit.item() <= 2:
-            # 2W4A: outlier_bit = (group_size - 1) * bit
             outlier_bit = (self.group_size - 1) * self.bit.item()
-            exp_bit = 2  # E2 格式：E2M3(g=4), E2M11(g=8)
+            exp_bit = 2
         else:
-            # W4A4: 保持原始邏輯（g>=4 cap 在 12-bit）
             outlier_bit = 12 if self.group_size >= 4 else self.bit.item()
             if self.group_size >= 4:
                 exp_bit = 2
@@ -381,11 +384,31 @@ class Quantizer(nn.Module):
             victim_mask.scatter_(1, outlier_idx.unsqueeze(1), False)     # outlier 位置不是 victim
             victim_mask = victim_mask & has_outlier.unsqueeze(1)          # 沒 outlier 的 group 不用犧牲
             
-            # victim 位置設為 0
-            groups = groups * (~victim_mask)
-            
-            # flatten 回去，並去掉 padding
-            quant_data = groups.view(-1)[:N]
+            if getattr(self.args, 'novictim', False):
+                # ---- NoVictim Block Coding ----
+                import sys, os
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from novictim_codec import encode_block, decode_block
+                import numpy as np
+                BSIZE = 16
+                pad = (BSIZE - N % BSIZE) % BSIZE
+                if pad > 0:
+                    quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
+                flat = quant_data.cpu().numpy()
+                num_blocks = len(flat) // BSIZE
+                out = np.zeros_like(flat)
+                for b in range(num_blocks):
+                    block = flat[b*BSIZE:(b+1)*BSIZE]
+                    code, _ = encode_block(block, outlier_threshold=32.0)
+                    out[b*BSIZE:(b+1)*BSIZE] = decode_block(code)
+                quant_data = torch.tensor(out, dtype=quant_data.dtype, device=quant_data.device)
+                quant_data = quant_data[:N]
+            else:
+                # ---- 原本 OVP ----
+                # victim 位置設為 0
+                groups = groups * (~victim_mask)
+                # flatten 回去，並去掉 padding
+                quant_data = groups.view(-1)[:N]
 
         quant_data = quant_data.view(shape)
         tensor = (quant_data - data).detach() + data
