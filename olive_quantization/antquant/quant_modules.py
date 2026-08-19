@@ -385,22 +385,18 @@ class Quantizer(nn.Module):
             victim_mask = victim_mask & has_outlier.unsqueeze(1)          # 沒 outlier 的 group 不用犧牲
             
             if getattr(self.args, 'novictim', False):
-                # ---- NoVictim Block Coding ----
+                # ---- NoVictim Block Coding (向量化 v2) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from novictim_codec import encode_block, decode_block
+                from novictim_codec import encode_blocks_batch, decode_blocks_batch
                 import numpy as np
                 BSIZE = 16
                 pad = (BSIZE - N % BSIZE) % BSIZE
                 if pad > 0:
                     quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
                 flat = quant_data.cpu().numpy()
-                num_blocks = len(flat) // BSIZE
-                out = np.zeros_like(flat)
-                for b in range(num_blocks):
-                    block = flat[b*BSIZE:(b+1)*BSIZE]
-                    code, _ = encode_block(block, outlier_threshold=32.0)
-                    out[b*BSIZE:(b+1)*BSIZE] = decode_block(code)
+                codes = encode_blocks_batch(flat)
+                out = decode_blocks_batch(codes)
                 quant_data = torch.tensor(out, dtype=quant_data.dtype, device=quant_data.device)
                 quant_data = quant_data[:N]
             else:
