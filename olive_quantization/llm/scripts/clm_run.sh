@@ -9,6 +9,7 @@ desc=${8:-""}
 n8=${9:-"0"}
 group_size=${10:-"2"}
 wbit=${11:-$q_bit}
+NOVICTIM_FLAG=${12:-""}
 
 mkdir -p ./log
 mkdir -p ./log/bigscience
@@ -29,4 +30,5 @@ python -u run_clm.py \
   --mode=$q_mode --wbit=$wbit --abit=$q_bit --a_low=75 --a_up=250 --w_low=75 --w_up=250 --layer_8bit_n=$n8 \
   --eval_batch_size=$batch_size --train_batch_size=$batch_size --quantize_batch_size=$batch_size \
   --group_size=$group_size \
+  ${NOVICTIM_FLAG} \
   2>&1 | tee ./log/${log_name}.log \

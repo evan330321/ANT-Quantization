@@ -275,6 +275,9 @@ class QuantizeArguments:
     no_outlier: Optional[bool] = field(
         default=False, metadata={"help": "Use outlier mode or not"}
     )
+    novictim: Optional[bool] = field(
+        default=False, metadata={"help": "Use NoVictim block coding instead of OVP"}
+    )
     group_size: Optional[int] = field(
         default=2, metadata={"help": "Group size for OVP quantization (2, 4, 8)"}
     )
