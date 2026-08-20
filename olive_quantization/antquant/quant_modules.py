@@ -388,7 +388,7 @@ class Quantizer(nn.Module):
                 # ---- NoVictim Block Coding (向量化 v2) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from novictim_codec import encode_blocks_batch, decode_blocks_batch
+                from novictim_codec import encode_blocks_batch, decode_blocks_batch, NO_OUTLIER, POS_STATES
                 import numpy as np
                 BSIZE = 16
                 pad = (BSIZE - N % BSIZE) % BSIZE
@@ -399,7 +399,16 @@ class Quantizer(nn.Module):
                 B = self.bit.item() - 1
                 dynamic_threshold = (2**B - 1) * 32 / (2**B)
                 codes = encode_blocks_batch(flat, outlier_threshold=dynamic_threshold)
-                out = decode_blocks_batch(codes)
+                out, scale_indices = decode_blocks_batch(codes)
+                # 只對 Case A 乘 per-block scale
+                # Case B 的 ternary 保持 {-1,0,+1}，outlier 已在 codebook 裡
+                scale_table = np.array([0.25, 0.50, 0.75, 1.00]) * dynamic_threshold
+                num_blocks_actual = len(codes)
+                is_caseA = ((codes % POS_STATES) == NO_OUTLIER)
+                out_2d = out.reshape(num_blocks_actual, BSIZE)
+                block_scales = np.where(is_caseA, scale_table[scale_indices], 1.0)
+                out_2d = out_2d * block_scales[:, None]
+                out = out_2d.reshape(-1)
                 quant_data = torch.tensor(out, dtype=quant_data.dtype, device=quant_data.device)
                 quant_data = quant_data[:N]
             else:

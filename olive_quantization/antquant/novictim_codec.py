@@ -65,7 +65,22 @@ def encode_blocks_batch(flat: np.ndarray, outlier_threshold: float = OUTLIER_THR
     # ---- Case A: 無 outlier ----
     # 16 個 ternary packed
     ternary_packed_16 = signs @ POWERS_16              # (num_blocks,)
-    code_A = NO_OUTLIER + POS_STATES * ternary_packed_16  # (num_blocks,)
+
+    # ---- per-block scale index (Case A only) ----
+    # scale_factors: 4 種 scale 倍率 × codebook_max
+    codebook_max = 32 / (2 ** 1)  # 2-bit: B=1, max=16 (預設，實際由 outlier_threshold 決定)
+    codebook_max = outlier_threshold  # 用 threshold 當 codebook_max
+    scale_factors = np.array([0.25, 0.50, 0.75, 1.00]) * codebook_max  # [4, 8, 12, 16]
+
+    # recon shape: (4, num_blocks, 16)
+    # 對每個 scale，算所有 block 的 MSE
+    signs_real = (signs - 1).astype(np.float64)  # 0/1/2 → -1/0/+1
+    recon = signs_real[None, :, :] * scale_factors[:, None, None]  # (4, N, 16)
+    mse = ((blocks[None, :, :] - recon) ** 2).mean(axis=2)  # (4, N)
+    scale_idx = mse.argmin(axis=0)  # (N,) 每個 block 最佳 scale
+
+    # Case A code: position + 17 × (scale_idx + 4 × ternary_packed_16)
+    code_A = NO_OUTLIER + POS_STATES * (scale_idx + 4 * ternary_packed_16)  # (num_blocks,)
 
     # ---- Case B: 有 outlier ----
     # outlier value → 找最近的 codebook index
@@ -115,14 +130,20 @@ def decode_blocks_batch(codes: np.ndarray) -> np.ndarray:
 
     # ---- Case A decode ----
     if is_A.any():
-        packed_A = rest[is_A]           # (n_A,)
-        n_A = packed_A.shape[0]
+        # 取出 scale_idx 和 ternary_packed
+        rest_A = rest[is_A]
+        scale_idx_A = rest_A % 4
+        ternary_packed_A = rest_A // 4
+
+        n_A = ternary_packed_A.shape[0]
         tern_A = np.zeros((n_A, BLOCK), dtype=np.int64)
-        p = packed_A.copy()
+        p = ternary_packed_A.copy()
         for i in range(BLOCK):
             tern_A[:, i] = p % 3
             p //= 3
-        out[is_A] = (tern_A - 1).astype(np.float64)   # 0/1/2 → -1/0/+1
+        signs_A = (tern_A - 1).astype(np.float64)  # -1/0/+1
+        # 只回傳 sign，scale 在外面處理（硬體友善）
+        out[is_A] = signs_A
 
     # ---- Case B decode ----
     if is_B.any():
@@ -156,7 +177,10 @@ def decode_blocks_batch(codes: np.ndarray) -> np.ndarray:
 
         out[is_B] = blocks_B
 
-    return out.reshape(-1)
+    # scale_indices: Case A 用 encode 時選的 scale_idx，Case B 預設 3
+    scale_indices = np.full(num_blocks, 3, dtype=np.int64)
+    scale_indices[is_A] = (rest[is_A] % 4).astype(np.int64)
+    return out.reshape(-1), scale_indices
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +236,15 @@ def _test_roundtrip():
     import time
     t0 = time.time()
     codes = encode_blocks_batch(flat)
-    recon = decode_blocks_batch(codes)
+    recon, scale_indices = decode_blocks_batch(codes)
+    # 乘回 scale
+    scale_table = np.array([0.25, 0.50, 0.75, 1.00]) * OUTLIER_THRESHOLD
+    recon_2d = recon.reshape(n_tests, BSIZE)
+    # 只對 Case A 乘 scale
+    is_caseA = ((codes % POS_STATES) == NO_OUTLIER)
+    block_scales = np.where(is_caseA, scale_table[scale_indices], 1.0)
+    recon_2d = recon_2d * block_scales[:, None]
+    recon = recon_2d.reshape(-1)
     t1 = time.time()
 
     print(f"\n向量化處理 {n_tests} 個 block 耗時: {t1-t0:.3f} 秒")
@@ -225,10 +257,15 @@ def _test_roundtrip():
     for b in range(n_tests):
         pos = position[b]
         if pos == NO_OUTLIER:
-            # Case A: sign 一致
+            # Case A: sign × best_scale 一致
+            block_w = w[b]
+            signs_b = np.sign(block_w)
+            scale_table = np.array([0.25, 0.50, 0.75, 1.00]) * OUTLIER_THRESHOLD
+            mse_list = [np.mean((block_w - signs_b * s)**2) for s in scale_table]
+            best_scale = scale_table[np.argmin(mse_list)]
             for i in range(BSIZE):
-                expected = int(np.sign(w[b, i]))
-                if abs(recon_blocks[b, i] - expected) > 1e-9:
+                expected = np.sign(w[b, i]) * best_scale
+                if abs(recon_blocks[b, i] - expected) > 1e-6:
                     fails += 1
                     break
         else:
