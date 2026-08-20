@@ -395,7 +395,10 @@ class Quantizer(nn.Module):
                 if pad > 0:
                     quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
                 flat = quant_data.cpu().numpy()
-                codes = encode_blocks_batch(flat)
+                # 動態 threshold：codebook 最大值 = (2^B-1) × 32/(2^B)
+                B = self.bit.item() - 1
+                dynamic_threshold = (2**B - 1) * 32 / (2**B)
+                codes = encode_blocks_batch(flat, outlier_threshold=dynamic_threshold)
                 out = decode_blocks_batch(codes)
                 quant_data = torch.tensor(out, dtype=quant_data.dtype, device=quant_data.device)
                 quant_data = quant_data[:N]

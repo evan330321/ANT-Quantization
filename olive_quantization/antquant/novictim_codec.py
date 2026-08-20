@@ -45,7 +45,7 @@ POWERS_15 = (3 ** np.arange(BLOCK - 1)).astype(np.int64)    # [1,3,9,...,3^14]
 # ---------------------------------------------------------------------------
 # 向量化 encode（核心）
 # ---------------------------------------------------------------------------
-def encode_blocks_batch(flat: np.ndarray) -> np.ndarray:
+def encode_blocks_batch(flat: np.ndarray, outlier_threshold: float = OUTLIER_THRESHOLD) -> np.ndarray:
     """
     flat: 1D array，長度必須是 BLOCK 的倍數（外部 padding 好）
     回傳: codes，shape (num_blocks,)，dtype int64
@@ -59,7 +59,7 @@ def encode_blocks_batch(flat: np.ndarray) -> np.ndarray:
 
     # ---- 找 outlier ----
     abs_blocks = np.abs(blocks)
-    has_outlier = (abs_blocks > OUTLIER_THRESHOLD).any(axis=1)  # (num_blocks,)
+    has_outlier = (abs_blocks > outlier_threshold).any(axis=1)  # (num_blocks,)
     outlier_pos = abs_blocks.argmax(axis=1)                      # (num_blocks,)
 
     # ---- Case A: 無 outlier ----
