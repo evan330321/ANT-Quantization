@@ -374,42 +374,57 @@ class Quantizer(nn.Module):
             N = quant_data.shape[0]
 
             if getattr(self.args, 'mixed_precision', False) and self.has_inited_quant_para:
-                # ---- 3-bit Mixed Precision (2組 W2 + 2組 W4) ----
+                # ---- 3-bit Mixed Precision 向量化版本 ----
+                # 64 weights/block, 4 groups/block, 每組 16 weights
+                # 選 MSE 降最多的 2 組用 W4，其餘用 W2
                 TOTAL = 64
                 GROUP = 16
                 N_GROUPS = 4
                 W4_COUNT = 2
 
-                grid_w2 = self.int_value_for_bit(2)
-                grid_w4 = self.int_value_for_bit(4)
+                grid_w2 = self.int_value_for_bit(2)  # 2-bit codebook
+                grid_w4 = self.int_value_for_bit(4)  # 4-bit codebook
 
+                # padding
                 pad = (TOTAL - N % TOTAL) % TOTAL
                 if pad > 0:
                     quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
 
                 num_blocks = len(quant_data) // TOTAL
-                out = torch.zeros_like(quant_data)
 
-                for b in range(num_blocks):
-                    block = quant_data[b*TOTAL:(b+1)*TOTAL]
-                    groups = block.view(N_GROUPS, GROUP)
-                    error_drop = torch.zeros(N_GROUPS, device=quant_data.device)
-                    for g in range(N_GROUPS):
-                        grp = groups[g]
-                        q2 = grid_w2[torch.argmin((grp.unsqueeze(1) - grid_w2.unsqueeze(0)).abs(), dim=1)]
-                        mse2 = ((grp - q2) ** 2).mean()
-                        q4 = grid_w4[torch.argmin((grp.unsqueeze(1) - grid_w4.unsqueeze(0)).abs(), dim=1)]
-                        mse4 = ((grp - q4) ** 2).mean()
-                        error_drop[g] = mse2 - mse4
-                    w4_groups = torch.topk(error_drop, W4_COUNT).indices
-                    result = torch.zeros_like(groups)
-                    for g in range(N_GROUPS):
-                        grp = groups[g]
-                        grid = grid_w4 if g in w4_groups else grid_w2
-                        result[g] = grid[torch.argmin((grp.unsqueeze(1) - grid.unsqueeze(0)).abs(), dim=1)]
-                    out[b*TOTAL:(b+1)*TOTAL] = result.view(-1)
+                # reshape: (num_blocks, N_GROUPS, GROUP)
+                groups = quant_data.view(num_blocks, N_GROUPS, GROUP)
 
-                quant_data = out[:N]
+                # ---- 向量化計算 W2/W4 MSE ----
+                # groups: (num_blocks, N_GROUPS, GROUP)
+                # grid_w2: (len_w2,), grid_w4: (len_w4,)
+
+                # W2 量化: (num_blocks, N_GROUPS, GROUP, len_w2)
+                diff_w2 = (groups.unsqueeze(-1) - grid_w2.view(1, 1, 1, -1)).abs()
+                idx_w2 = diff_w2.argmin(dim=-1)          # (num_blocks, N_GROUPS, GROUP)
+                q_w2 = grid_w2[idx_w2]                   # (num_blocks, N_GROUPS, GROUP)
+                mse_w2 = ((groups - q_w2) ** 2).mean(dim=-1)  # (num_blocks, N_GROUPS)
+
+                # W4 量化: (num_blocks, N_GROUPS, GROUP, len_w4)
+                diff_w4 = (groups.unsqueeze(-1) - grid_w4.view(1, 1, 1, -1)).abs()
+                idx_w4 = diff_w4.argmin(dim=-1)          # (num_blocks, N_GROUPS, GROUP)
+                q_w4 = grid_w4[idx_w4]                   # (num_blocks, N_GROUPS, GROUP)
+                mse_w4 = ((groups - q_w4) ** 2).mean(dim=-1)  # (num_blocks, N_GROUPS)
+
+                # error_drop: (num_blocks, N_GROUPS)
+                error_drop = mse_w2 - mse_w4
+
+                # 選 error_drop 最大的 W4_COUNT 組
+                # w4_mask: (num_blocks, N_GROUPS) bool
+                topk_idx = error_drop.topk(W4_COUNT, dim=-1).indices  # (num_blocks, W4_COUNT)
+                w4_mask = torch.zeros(num_blocks, N_GROUPS, dtype=torch.bool, device=quant_data.device)
+                w4_mask.scatter_(1, topk_idx, True)
+
+                # 合併結果：W4 組用 q_w4，W2 組用 q_w2
+                # w4_mask: (num_blocks, N_GROUPS) → (num_blocks, N_GROUPS, 1)
+                result = torch.where(w4_mask.unsqueeze(-1), q_w4, q_w2)  # (num_blocks, N_GROUPS, GROUP)
+
+                quant_data = result.view(-1)[:N]
 
             elif getattr(self.args, 'novictim', False) and self.has_inited_quant_para:
                 # ---- NoVictim Block Coding (向量化 v3) ----
