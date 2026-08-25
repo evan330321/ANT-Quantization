@@ -362,7 +362,7 @@ class Quantizer(nn.Module):
             quant_data = quant_data.view(-1)
             N = quant_data.shape[0]
 
-            if getattr(self.args, 'novictim', False):
+            if getattr(self.args, 'novictim', False) and self.has_inited_quant_para:
                 # ---- NoVictim Block Coding (向量化 v3) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
