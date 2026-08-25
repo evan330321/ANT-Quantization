@@ -357,35 +357,13 @@ class Quantizer(nn.Module):
         quant_data = QuantBase.forward(data, quant_grid, normal_size)
         shape = data.shape
         
-        # Outlier Victim Pair Encoding (支援 group_size = 2, 4, 8)
+        # Outlier Victim Pair Encoding / NoVictim Block Coding
         if not self.args.no_outlier:
             quant_data = quant_data.view(-1)
-            mask = quant_data.abs() > 32
-            
-            G = self.group_size
             N = quant_data.shape[0]
-            
-            # padding 讓長度是 G 的倍數
-            pad = (G - N % G) % G
-            if pad > 0:
-                quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
-                mask = torch.cat([mask, torch.zeros(pad, dtype=torch.bool, device=mask.device)])
-            
-            # reshape 成 (num_groups, group_size)
-            groups = quant_data.view(-1, G)
-            mask_g = mask.view(-1, G)
-            
-            # 每個 group 找是否有 outlier + outlier 位置
-            has_outlier = mask_g.any(dim=1)                     # shape: (num_groups,)
-            outlier_idx = groups.abs().argmax(dim=1)            # shape: (num_groups,)
-            
-            # 建立 victim mask：除了 outlier 位置，其他都是 victim
-            victim_mask = torch.ones_like(groups, dtype=torch.bool)
-            victim_mask.scatter_(1, outlier_idx.unsqueeze(1), False)     # outlier 位置不是 victim
-            victim_mask = victim_mask & has_outlier.unsqueeze(1)          # 沒 outlier 的 group 不用犧牲
-            
+
             if getattr(self.args, 'novictim', False):
-                # ---- NoVictim Block Coding (向量化 v2) ----
+                # ---- NoVictim Block Coding (向量化 v3) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                 from novictim_codec import encode_blocks_batch, decode_blocks_batch, NO_OUTLIER, POS_STATES
@@ -401,7 +379,6 @@ class Quantizer(nn.Module):
                 codes = encode_blocks_batch(flat, outlier_threshold=dynamic_threshold)
                 out, scale_indices = decode_blocks_batch(codes)
                 # 只對 Case A 乘 per-block scale
-                # Case B 的 ternary 保持 {-1,0,+1}，outlier 已在 codebook 裡
                 scale_table = np.array([0.25, 0.50, 0.75, 1.00]) * dynamic_threshold
                 num_blocks_actual = len(codes)
                 is_caseA = ((codes % POS_STATES) == NO_OUTLIER)
@@ -413,6 +390,19 @@ class Quantizer(nn.Module):
                 quant_data = quant_data[:N]
             else:
                 # ---- 原本 OVP ----
+                mask = quant_data.abs() > 32
+                G = self.group_size
+                pad = (G - N % G) % G
+                if pad > 0:
+                    quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
+                    mask = torch.cat([mask, torch.zeros(pad, dtype=torch.bool, device=mask.device)])
+                groups = quant_data.view(-1, G)
+                mask_g = mask.view(-1, G)
+                has_outlier = mask_g.any(dim=1)
+                outlier_idx = groups.abs().argmax(dim=1)
+                victim_mask = torch.ones_like(groups, dtype=torch.bool)
+                victim_mask.scatter_(1, outlier_idx.unsqueeze(1), False)
+                victim_mask = victim_mask & has_outlier.unsqueeze(1)
                 # victim 位置設為 0
                 groups = groups * (~victim_mask)
                 # flatten 回去，並去掉 padding
