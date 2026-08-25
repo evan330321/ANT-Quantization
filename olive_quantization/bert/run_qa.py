@@ -352,6 +352,8 @@ def parse_args():
     )
     parser.add_argument("--novictim", action="store_true",
                         help="Use NoVictim block coding instead of OVP")
+    parser.add_argument("--mixed_precision", action="store_true",
+                        help="Use 3-bit mixed precision (2 groups W2 + 2 groups W4 per 64-weight block)")
     parser.add_argument("--group_size", type=int, default=2,
                         help="OVP group size (2, 4, or 8). Default=2 (original OliVe).")
     args = parser.parse_args()

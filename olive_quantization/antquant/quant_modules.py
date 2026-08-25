@@ -112,6 +112,17 @@ class Quantizer(nn.Module):
         return values
 
     @torch.no_grad()
+    def int_value_for_bit(self, bit_width):
+        """回傳指定 bit_width 的 int codebook，不依賴 self.bit"""
+        B = bit_width - 1  # signed
+        values = [0.]
+        for i in range(1, 2 ** B):
+            values.append(float(i))
+            values.append(float(-i))
+        values = torch.tensor(sorted(values), device=self.quant_grid.device)
+        values *= 32 / (2 ** B)
+        return values
+
     def flint_value(self,  exp_base = 0):
         B = self.bit.item()
         if self.is_signed:
@@ -362,7 +373,45 @@ class Quantizer(nn.Module):
             quant_data = quant_data.view(-1)
             N = quant_data.shape[0]
 
-            if getattr(self.args, 'novictim', False):
+            if getattr(self.args, 'mixed_precision', False) and self.has_inited_quant_para:
+                # ---- 3-bit Mixed Precision (2組 W2 + 2組 W4) ----
+                TOTAL = 64
+                GROUP = 16
+                N_GROUPS = 4
+                W4_COUNT = 2
+
+                grid_w2 = self.int_value_for_bit(2)
+                grid_w4 = self.int_value_for_bit(4)
+
+                pad = (TOTAL - N % TOTAL) % TOTAL
+                if pad > 0:
+                    quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
+
+                num_blocks = len(quant_data) // TOTAL
+                out = torch.zeros_like(quant_data)
+
+                for b in range(num_blocks):
+                    block = quant_data[b*TOTAL:(b+1)*TOTAL]
+                    groups = block.view(N_GROUPS, GROUP)
+                    error_drop = torch.zeros(N_GROUPS, device=quant_data.device)
+                    for g in range(N_GROUPS):
+                        grp = groups[g]
+                        q2 = grid_w2[torch.argmin((grp.unsqueeze(1) - grid_w2.unsqueeze(0)).abs(), dim=1)]
+                        mse2 = ((grp - q2) ** 2).mean()
+                        q4 = grid_w4[torch.argmin((grp.unsqueeze(1) - grid_w4.unsqueeze(0)).abs(), dim=1)]
+                        mse4 = ((grp - q4) ** 2).mean()
+                        error_drop[g] = mse2 - mse4
+                    w4_groups = torch.topk(error_drop, W4_COUNT).indices
+                    result = torch.zeros_like(groups)
+                    for g in range(N_GROUPS):
+                        grp = groups[g]
+                        grid = grid_w4 if g in w4_groups else grid_w2
+                        result[g] = grid[torch.argmin((grp.unsqueeze(1) - grid.unsqueeze(0)).abs(), dim=1)]
+                    out[b*TOTAL:(b+1)*TOTAL] = result.view(-1)
+
+                quant_data = out[:N]
+
+            elif getattr(self.args, 'novictim', False) and self.has_inited_quant_para:
                 # ---- NoVictim Block Coding (向量化 v3) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
