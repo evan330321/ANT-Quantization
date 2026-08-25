@@ -281,6 +281,9 @@ class QuantizeArguments:
     group_size: Optional[int] = field(
         default=2, metadata={"help": "Group size for OVP quantization (2, 4, 8)"}
     )
+    mixed_precision: Optional[bool] = field(
+        default=False, metadata={"help": "Use 3-bit mixed precision (2xW2 + 2xW4 per 64-weight block)"}
+    )
 
 
 def main():

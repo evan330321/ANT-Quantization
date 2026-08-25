@@ -374,13 +374,13 @@ class Quantizer(nn.Module):
             N = quant_data.shape[0]
 
             if getattr(self.args, 'mixed_precision', False) and self.has_inited_quant_para:
-                # ---- 3-bit Mixed Precision 向量化版本 ----
-                # 64 weights/block, 4 groups/block, 每組 16 weights
-                # 選 MSE 降最多的 2 組用 W4，其餘用 W2
+                # ---- 3-bit Mixed Precision 向量化版本（per-group alpha search）----
                 TOTAL = 64
                 GROUP = 16
                 N_GROUPS = 4
                 W4_COUNT = 2
+                lb = int(self.w_low)
+                ub = int(self.w_up)
 
                 grid_w2 = self.int_value_for_bit(2)  # 2-bit codebook
                 grid_w4 = self.int_value_for_bit(4)  # 4-bit codebook
@@ -395,35 +395,73 @@ class Quantizer(nn.Module):
                 # reshape: (num_blocks, N_GROUPS, GROUP)
                 groups = quant_data.view(num_blocks, N_GROUPS, GROUP)
 
-                # ---- 向量化計算 W2/W4 MSE ----
-                # groups: (num_blocks, N_GROUPS, GROUP)
-                # grid_w2: (len_w2,), grid_w4: (len_w4,)
+                # 攤平成 (M, GROUP)，M = num_blocks × N_GROUPS
+                flat_groups = groups.reshape(-1, GROUP)
+                M = flat_groups.shape[0]
 
-                # W2 量化: (num_blocks, N_GROUPS, GROUP, len_w2)
-                diff_w2 = (groups.unsqueeze(-1) - grid_w2.view(1, 1, 1, -1)).abs()
-                idx_w2 = diff_w2.argmin(dim=-1)          # (num_blocks, N_GROUPS, GROUP)
-                q_w2 = grid_w2[idx_w2]                   # (num_blocks, N_GROUPS, GROUP)
-                mse_w2 = ((groups - q_w2) ** 2).mean(dim=-1)  # (num_blocks, N_GROUPS)
+                # base_alpha: (M, 1)
+                mean = flat_groups.mean(dim=1, keepdim=True)
+                std = flat_groups.std(dim=1, keepdim=True)
+                base_alpha = torch.maximum((mean + 3*std).abs(), (mean - 3*std).abs())
+                base_alpha = base_alpha.clamp(min=1e-8)
 
-                # W4 量化: (num_blocks, N_GROUPS, GROUP, len_w4)
-                diff_w4 = (groups.unsqueeze(-1) - grid_w4.view(1, 1, 1, -1)).abs()
-                idx_w4 = diff_w4.argmin(dim=-1)          # (num_blocks, N_GROUPS, GROUP)
-                q_w4 = grid_w4[idx_w4]                   # (num_blocks, N_GROUPS, GROUP)
-                mse_w4 = ((groups - q_w4) ** 2).mean(dim=-1)  # (num_blocks, N_GROUPS)
+                # per-group alpha search for W2 and W4
+                best_alpha_w2 = base_alpha.clone()
+                best_alpha_w4 = base_alpha.clone()
+                best_mse_w2 = torch.ones(M, 1, device=quant_data.device) * 1e10
+                best_mse_w4 = torch.ones(M, 1, device=quant_data.device) * 1e10
 
-                # error_drop: (num_blocks, N_GROUPS)
-                error_drop = mse_w2 - mse_w4
+                max_w2 = grid_w2.max()
+                max_w4 = grid_w4.max()
+
+                for i in range(lb, ub, 2):
+                    trial_alpha = base_alpha * (i * 0.01)  # (M, 1)
+
+                    # W2
+                    scale_w2 = trial_alpha / max_w2
+                    internal_w2 = flat_groups / scale_w2
+                    idx_w2 = (internal_w2.unsqueeze(-1) - grid_w2.view(1, 1, -1)).abs().argmin(dim=-1)
+                    recon_w2 = grid_w2[idx_w2] * scale_w2
+                    mse_w2 = ((flat_groups - recon_w2) ** 2).mean(dim=1, keepdim=True)
+                    better_w2 = mse_w2 < best_mse_w2
+                    best_alpha_w2 = torch.where(better_w2, trial_alpha, best_alpha_w2)
+                    best_mse_w2 = torch.where(better_w2, mse_w2, best_mse_w2)
+
+                    # W4
+                    scale_w4 = trial_alpha / max_w4
+                    internal_w4 = flat_groups / scale_w4
+                    idx_w4 = (internal_w4.unsqueeze(-1) - grid_w4.view(1, 1, -1)).abs().argmin(dim=-1)
+                    recon_w4 = grid_w4[idx_w4] * scale_w4
+                    mse_w4 = ((flat_groups - recon_w4) ** 2).mean(dim=1, keepdim=True)
+                    better_w4 = mse_w4 < best_mse_w4
+                    best_alpha_w4 = torch.where(better_w4, trial_alpha, best_alpha_w4)
+                    best_mse_w4 = torch.where(better_w4, mse_w4, best_mse_w4)
+
+                # error_drop: (M,) → reshape to (num_blocks, N_GROUPS)
+                error_drop = (best_mse_w2 - best_mse_w4).view(num_blocks, N_GROUPS)
 
                 # 選 error_drop 最大的 W4_COUNT 組
-                # w4_mask: (num_blocks, N_GROUPS) bool
-                topk_idx = error_drop.topk(W4_COUNT, dim=-1).indices  # (num_blocks, W4_COUNT)
+                topk_idx = error_drop.topk(W4_COUNT, dim=-1).indices
                 w4_mask = torch.zeros(num_blocks, N_GROUPS, dtype=torch.bool, device=quant_data.device)
-                w4_mask.scatter_(1, topk_idx, True)
+                w4_mask.scatter_(1, topk_idx, True)  # (num_blocks, N_GROUPS)
 
-                # 合併結果：W4 組用 q_w4，W2 組用 q_w2
-                # w4_mask: (num_blocks, N_GROUPS) → (num_blocks, N_GROUPS, 1)
-                result = torch.where(w4_mask.unsqueeze(-1), q_w4, q_w2)  # (num_blocks, N_GROUPS, GROUP)
+                # 用最佳 alpha 重新量化
+                best_alpha_w2 = best_alpha_w2.view(num_blocks, N_GROUPS, 1)
+                best_alpha_w4 = best_alpha_w4.view(num_blocks, N_GROUPS, 1)
 
+                scale_w2_final = best_alpha_w2 / max_w2
+                scale_w4_final = best_alpha_w4 / max_w4
+
+                internal_w2_final = groups / scale_w2_final
+                idx_w2_final = (internal_w2_final.unsqueeze(-1) - grid_w2.view(1, 1, 1, -1)).abs().argmin(dim=-1)
+                q_w2_final = grid_w2[idx_w2_final] * scale_w2_final
+
+                internal_w4_final = groups / scale_w4_final
+                idx_w4_final = (internal_w4_final.unsqueeze(-1) - grid_w4.view(1, 1, 1, -1)).abs().argmin(dim=-1)
+                q_w4_final = grid_w4[idx_w4_final] * scale_w4_final
+
+                # 合併結果
+                result = torch.where(w4_mask.unsqueeze(-1), q_w4_final, q_w2_final)
                 quant_data = result.view(-1)[:N]
 
             elif getattr(self.args, 'novictim', False) and self.has_inited_quant_para:

@@ -10,6 +10,7 @@ n8=${9:-"0"}
 group_size=${10:-"2"}
 wbit=${11:-$q_bit}
 NOVICTIM_FLAG=${12:-""}
+MIXED_PRECISION_FLAG=${13:-""}
 
 mkdir -p ./log
 mkdir -p ./log/bigscience
@@ -31,4 +32,5 @@ python -u run_clm.py \
   --eval_batch_size=$batch_size --train_batch_size=$batch_size --quantize_batch_size=$batch_size \
   --group_size=$group_size \
   ${NOVICTIM_FLAG} \
+  ${MIXED_PRECISION_FLAG} \
   2>&1 | tee ./log/${log_name}.log \
