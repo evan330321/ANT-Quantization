@@ -12,6 +12,7 @@ wbit=${11:-$q_bit}
 NOVICTIM_FLAG=${12:-""}
 MIXED_PRECISION_FLAG=${13:-""}
 W3_EXP_BIT=${14:-"2"}
+NO_OUTLIER_FLAG=${15:-""}
 
 mkdir -p ./log
 mkdir -p ./log/bigscience
@@ -35,4 +36,5 @@ python -u run_clm.py \
   ${NOVICTIM_FLAG} \
   ${MIXED_PRECISION_FLAG} \
   --w3_exp_bit=$W3_EXP_BIT \
+  ${NO_OUTLIER_FLAG} \
   2>&1 | tee ./log/${log_name}.log \

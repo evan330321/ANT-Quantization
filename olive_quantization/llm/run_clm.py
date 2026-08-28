@@ -283,9 +283,9 @@ class QuantizeArguments:
     )
     mixed_precision: Optional[bool] = field(
         default=False, metadata={"help": "Use 3-bit mixed precision (2xW2 + 2xW4 per 64-weight block)"}
+    )
     w3_exp_bit: Optional[int] = field(
         default=2, metadata={"help": "Outlier exponent bit for W3A4 g=4 (2 or 3)"}
-    )
     )
 
 
