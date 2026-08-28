@@ -198,7 +198,19 @@ class Quantizer(nn.Module):
         # outlier_bit 設計：
         # W4A4: g=2→4bit(E2M1), g=4→12bit(E2M9), g=8→12bit(E2M9)
         # 2W4A: g=4→6bit(E2M3), g=8→14bit(E2M11)
-        if self.bit.item() <= 2:
+        # outlier_bit 設計：
+        # W4A4: g=2→4bit(E2M1), g=4→12bit(E2M9), g=8→12bit(E2M9)
+        # W3A4: g=2→3bit(E1M1), g=4→9bit(E2M6 or E3M5)
+        # W2A4: g=4→6bit(E2M3), g=8→14bit(E2M11)
+        if self.bit.item() == 3:
+            # W3A4: outlier_bit = (group_size - 1) × 3
+            outlier_bit = (self.group_size - 1) * self.bit.item()
+            if self.group_size == 2:
+                exp_bit = 1  # E1M1
+            elif self.group_size == 4:
+                # E2M6 (default), 可透過 args 改成 E3M5
+                exp_bit = getattr(self.args, 'w3_exp_bit', 2)
+        elif self.bit.item() <= 2:
             outlier_bit = (self.group_size - 1) * self.bit.item()
             exp_bit = 2
         else:
