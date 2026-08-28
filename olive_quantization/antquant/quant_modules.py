@@ -344,6 +344,83 @@ class Quantizer(nn.Module):
          
     @torch.no_grad()   
     def _forward(self, data, display=False):
+        # ---- 3-bit Mixed Precision（在量化之前執行）----
+        if getattr(self.args, 'mixed_precision', False) and self.has_inited_quant_para:
+            shape = data.shape
+            flat = data.reshape(-1)
+            N = flat.shape[0]
+            TOTAL = 64
+            GROUP = 16
+            N_GROUPS = 4
+            W4_COUNT = 2
+            lb = int(self.w_low)
+            ub = int(self.w_up)
+
+            grid_w2 = self.int_value_for_bit(2)
+            grid_w4 = self.int_value_for_bit(4)
+
+            pad = (TOTAL - N % TOTAL) % TOTAL
+            if pad > 0:
+                flat = torch.cat([flat, torch.zeros(pad, device=flat.device, dtype=flat.dtype)])
+
+            num_blocks = len(flat) // TOTAL
+            groups = flat.view(num_blocks, N_GROUPS, GROUP)
+            flat_groups = groups.reshape(-1, GROUP)
+            M = flat_groups.shape[0]
+
+            mean = flat_groups.mean(dim=1, keepdim=True)
+            std = flat_groups.std(dim=1, keepdim=True)
+            base_alpha = torch.maximum((mean + 3*std).abs(), (mean - 3*std).abs()).clamp(min=1e-8)
+
+            best_alpha_w2 = base_alpha.clone()
+            best_alpha_w4 = base_alpha.clone()
+            best_mse_w2 = torch.ones(M, 1, device=flat.device) * 1e10
+            best_mse_w4 = torch.ones(M, 1, device=flat.device) * 1e10
+            max_w2 = grid_w2.max()
+            max_w4 = grid_w4.max()
+
+            for ii in range(lb, ub, 2):
+                trial_alpha = base_alpha * (ii * 0.01)
+                # W2
+                scale_w2 = trial_alpha / max_w2
+                internal_w2 = flat_groups / scale_w2
+                idx_w2 = (internal_w2.unsqueeze(-1) - grid_w2.view(1, 1, -1)).abs().argmin(dim=-1)
+                recon_w2 = grid_w2[idx_w2] * scale_w2
+                mse_w2 = ((flat_groups - recon_w2) ** 2).mean(dim=1, keepdim=True)
+                better_w2 = mse_w2 < best_mse_w2
+                best_alpha_w2 = torch.where(better_w2, trial_alpha, best_alpha_w2)
+                best_mse_w2 = torch.where(better_w2, mse_w2, best_mse_w2)
+                # W4
+                scale_w4 = trial_alpha / max_w4
+                internal_w4 = flat_groups / scale_w4
+                idx_w4 = (internal_w4.unsqueeze(-1) - grid_w4.view(1, 1, -1)).abs().argmin(dim=-1)
+                recon_w4 = grid_w4[idx_w4] * scale_w4
+                mse_w4 = ((flat_groups - recon_w4) ** 2).mean(dim=1, keepdim=True)
+                better_w4 = mse_w4 < best_mse_w4
+                best_alpha_w4 = torch.where(better_w4, trial_alpha, best_alpha_w4)
+                best_mse_w4 = torch.where(better_w4, mse_w4, best_mse_w4)
+
+            error_drop = (best_mse_w2 - best_mse_w4).view(num_blocks, N_GROUPS)
+            topk_idx = error_drop.topk(W4_COUNT, dim=-1).indices
+            w4_mask = torch.zeros(num_blocks, N_GROUPS, dtype=torch.bool, device=flat.device)
+            w4_mask.scatter_(1, topk_idx, True)
+
+            best_alpha_w2 = best_alpha_w2.view(num_blocks, N_GROUPS, 1)
+            best_alpha_w4 = best_alpha_w4.view(num_blocks, N_GROUPS, 1)
+            scale_w2_final = best_alpha_w2 / max_w2
+            scale_w4_final = best_alpha_w4 / max_w4
+
+            internal_w2_final = groups / scale_w2_final
+            idx_w2_final = (internal_w2_final.unsqueeze(-1) - grid_w2.view(1, 1, 1, -1)).abs().argmin(dim=-1)
+            q_w2_final = grid_w2[idx_w2_final] * scale_w2_final
+
+            internal_w4_final = groups / scale_w4_final
+            idx_w4_final = (internal_w4_final.unsqueeze(-1) - grid_w4.view(1, 1, 1, -1)).abs().argmin(dim=-1)
+            q_w4_final = grid_w4[idx_w4_final] * scale_w4_final
+
+            result = torch.where(w4_mask.unsqueeze(-1), q_w4_final, q_w2_final)
+            tensor = result.view(-1)[:N].view(shape)
+            return tensor
         scale = self.alpha / torch.max(self.quant_grid)
         
         if self.is_perchannel: 
@@ -365,6 +442,7 @@ class Quantizer(nn.Module):
             
         # 全部走 CUDA kernel（不管 group_size）
         normal_size = self.quant_grid.shape[0] if not self.args.no_outlier else -1
+
         quant_data = QuantBase.forward(data, quant_grid, normal_size)
         shape = data.shape
         
@@ -373,98 +451,7 @@ class Quantizer(nn.Module):
             quant_data = quant_data.view(-1)
             N = quant_data.shape[0]
 
-            if getattr(self.args, 'mixed_precision', False) and self.has_inited_quant_para:
-                # ---- 3-bit Mixed Precision 向量化版本（per-group alpha search）----
-                TOTAL = 64
-                GROUP = 16
-                N_GROUPS = 4
-                W4_COUNT = 2
-                lb = int(self.w_low)
-                ub = int(self.w_up)
-
-                grid_w2 = self.int_value_for_bit(2)  # 2-bit codebook
-                grid_w4 = self.int_value_for_bit(4)  # 4-bit codebook
-
-                # padding
-                pad = (TOTAL - N % TOTAL) % TOTAL
-                if pad > 0:
-                    quant_data = torch.cat([quant_data, torch.zeros(pad, device=quant_data.device, dtype=quant_data.dtype)])
-
-                num_blocks = len(quant_data) // TOTAL
-
-                # reshape: (num_blocks, N_GROUPS, GROUP)
-                groups = quant_data.view(num_blocks, N_GROUPS, GROUP)
-
-                # 攤平成 (M, GROUP)，M = num_blocks × N_GROUPS
-                flat_groups = groups.reshape(-1, GROUP)
-                M = flat_groups.shape[0]
-
-                # base_alpha: (M, 1)
-                mean = flat_groups.mean(dim=1, keepdim=True)
-                std = flat_groups.std(dim=1, keepdim=True)
-                base_alpha = torch.maximum((mean + 3*std).abs(), (mean - 3*std).abs())
-                base_alpha = base_alpha.clamp(min=1e-8)
-
-                # per-group alpha search for W2 and W4
-                best_alpha_w2 = base_alpha.clone()
-                best_alpha_w4 = base_alpha.clone()
-                best_mse_w2 = torch.ones(M, 1, device=quant_data.device) * 1e10
-                best_mse_w4 = torch.ones(M, 1, device=quant_data.device) * 1e10
-
-                max_w2 = grid_w2.max()
-                max_w4 = grid_w4.max()
-
-                for i in range(lb, ub, 2):
-                    trial_alpha = base_alpha * (i * 0.01)  # (M, 1)
-
-                    # W2
-                    scale_w2 = trial_alpha / max_w2
-                    internal_w2 = flat_groups / scale_w2
-                    idx_w2 = (internal_w2.unsqueeze(-1) - grid_w2.view(1, 1, -1)).abs().argmin(dim=-1)
-                    recon_w2 = grid_w2[idx_w2] * scale_w2
-                    mse_w2 = ((flat_groups - recon_w2) ** 2).mean(dim=1, keepdim=True)
-                    better_w2 = mse_w2 < best_mse_w2
-                    best_alpha_w2 = torch.where(better_w2, trial_alpha, best_alpha_w2)
-                    best_mse_w2 = torch.where(better_w2, mse_w2, best_mse_w2)
-
-                    # W4
-                    scale_w4 = trial_alpha / max_w4
-                    internal_w4 = flat_groups / scale_w4
-                    idx_w4 = (internal_w4.unsqueeze(-1) - grid_w4.view(1, 1, -1)).abs().argmin(dim=-1)
-                    recon_w4 = grid_w4[idx_w4] * scale_w4
-                    mse_w4 = ((flat_groups - recon_w4) ** 2).mean(dim=1, keepdim=True)
-                    better_w4 = mse_w4 < best_mse_w4
-                    best_alpha_w4 = torch.where(better_w4, trial_alpha, best_alpha_w4)
-                    best_mse_w4 = torch.where(better_w4, mse_w4, best_mse_w4)
-
-                # error_drop: (M,) → reshape to (num_blocks, N_GROUPS)
-                error_drop = (best_mse_w2 - best_mse_w4).view(num_blocks, N_GROUPS)
-
-                # 選 error_drop 最大的 W4_COUNT 組
-                topk_idx = error_drop.topk(W4_COUNT, dim=-1).indices
-                w4_mask = torch.zeros(num_blocks, N_GROUPS, dtype=torch.bool, device=quant_data.device)
-                w4_mask.scatter_(1, topk_idx, True)  # (num_blocks, N_GROUPS)
-
-                # 用最佳 alpha 重新量化
-                best_alpha_w2 = best_alpha_w2.view(num_blocks, N_GROUPS, 1)
-                best_alpha_w4 = best_alpha_w4.view(num_blocks, N_GROUPS, 1)
-
-                scale_w2_final = best_alpha_w2 / max_w2
-                scale_w4_final = best_alpha_w4 / max_w4
-
-                internal_w2_final = groups / scale_w2_final
-                idx_w2_final = (internal_w2_final.unsqueeze(-1) - grid_w2.view(1, 1, 1, -1)).abs().argmin(dim=-1)
-                q_w2_final = grid_w2[idx_w2_final] * scale_w2_final
-
-                internal_w4_final = groups / scale_w4_final
-                idx_w4_final = (internal_w4_final.unsqueeze(-1) - grid_w4.view(1, 1, 1, -1)).abs().argmin(dim=-1)
-                q_w4_final = grid_w4[idx_w4_final] * scale_w4_final
-
-                # 合併結果
-                result = torch.where(w4_mask.unsqueeze(-1), q_w4_final, q_w2_final)
-                quant_data = result.view(-1)[:N]
-
-            elif getattr(self.args, 'novictim', False) and self.has_inited_quant_para:
+            if getattr(self.args, 'novictim', False) and self.has_inited_quant_para:
                 # ---- NoVictim Block Coding (向量化 v3) ----
                 import sys, os
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
